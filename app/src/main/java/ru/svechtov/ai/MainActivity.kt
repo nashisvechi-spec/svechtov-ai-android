@@ -61,6 +61,34 @@ class MainActivity : ComponentActivity() {
    JSONObject(response).getJSONObject("result").getJSONArray("alternatives").getJSONObject(0).getJSONObject("message").getString("text")
   } finally { conn.disconnect() }
  }
+
+ private fun databaseContext(data:JSONObject,question:String):String {
+  val orders=data.optJSONArray("orders")
+  val clients=data.optJSONArray("clients")
+  val stock=data.optJSONArray("stock")
+  val tokens=Regex("[\\p{L}\\p{N}]{3,}").findAll(question.lowercase()).map { it.value }.filterNot { it in setOf("сколько","какие","покажи","заказов","икон","всего","мне","есть","этот","месяц","заказы") }.toList()
+  val out=StringBuilder()
+  out.append("\\nДоступен полный локальный снимок: заказов=").append(orders?.length() ?: 0)
+   .append(", клиентов=").append(clients?.length() ?: 0).append(", позиций склада=").append(stock?.length() ?: 0).append(".")
+  // Search every record in every collection; never silently scan just the first 8000 characters.
+  var matches=0
+  var omitted=0
+  for (pair in listOf("orders" to orders,"clients" to clients,"stock" to stock)) {
+   val array=pair.second ?: continue
+   for(i in 0 until array.length()) {
+    val record=array.opt(i)?.toString() ?: continue
+    if(tokens.isNotEmpty() && tokens.any { record.lowercase().contains(it) }) {
+     if(out.length + record.length < 25000 && matches < 50) {
+      out.append("\\n").append(pair.first).append("[").append(i).append("]: ").append(record)
+      matches++
+     } else omitted++
+    }
+   }
+  }
+  if(tokens.isEmpty()) out.append("\\nУточни критерии выборки: передача всей базы в одном запросе отключена.")
+  if(omitted>0) out.append("\\nОграничение контекста: ещё ").append(omitted).append(" совпадений не переданы модели. Не делай выводов о полноте выборки.")
+  return out.toString()
+ }
  @Composable private fun App() {
   var tab by remember { mutableIntStateOf(0) }
   var secret by remember { mutableStateOf("") }
@@ -98,7 +126,7 @@ class MainActivity : ComponentActivity() {
       Button(enabled=!busy&&question.isNotBlank(),onClick={
        busy=true;scope.launch {
         val q=question;val s=snapshot
-        val local=if(s!=null) "\nЛокальный снимок (ограниченная выборка): "+s.toString().take(8000) else "\nБаза не загружена."
+        val local=if(s!=null && Regex("заказ|склад|икон|клиент|производ|остат|выруч|статист|долг|верба",RegexOption.IGNORE_CASE).containsMatchIn(q)) databaseContext(s,q) else ""
         response=if(model.isBlank()) "Укажи modelUri в настройках." else {
          val k=secret.ifBlank { loadSecret() }
          if(k.isBlank()) "Сохрани API-ключ в настройках." else runCatching { ask(k,model,q+local) }.getOrElse { "Ошибка сети: "+it.message }
