@@ -15,7 +15,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      - name: Verify preinstalled Android SDK
+        run: |
+          test -d "$ANDROID_HOME/platforms/android-35" || (echo 'Android API 35 not installed' && exit 1)
+          test -d "$ANDROID_HOME/build-tools/35.0.0" || (echo 'Android build-tools 35 missing' && exit 1)
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
