@@ -3,6 +3,7 @@ package ru.svechtov.ai
 import android.os.Bundle
 import android.net.Uri
 import android.content.Intent
+import org.json.JSONArray
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -63,30 +64,19 @@ class MainActivity : ComponentActivity() {
  }
 
  private fun databaseContext(data:JSONObject,question:String):String {
-  val orders=data.optJSONArray("orders")
-  val clients=data.optJSONArray("clients")
-  val stock=data.optJSONArray("stock")
-  val tokens=Regex("[\\p{L}\\p{N}]{3,}").findAll(question.lowercase()).map { it.value }.filterNot { it in setOf("сколько","какие","покажи","заказов","икон","всего","мне","есть","этот","месяц","заказы") }.toList()
-  val out=StringBuilder()
-  out.append("\\nДоступен полный локальный снимок: заказов=").append(orders?.length() ?: 0)
-   .append(", клиентов=").append(clients?.length() ?: 0).append(", позиций склада=").append(stock?.length() ?: 0).append(".")
-  // Search every record in every collection; never silently scan just the first 8000 characters.
-  var matches=0
-  var omitted=0
-  for (pair in listOf("orders" to orders,"clients" to clients,"stock" to stock)) {
-   val array=pair.second ?: continue
-   for(i in 0 until array.length()) {
-    val record=array.opt(i)?.toString() ?: continue
-    if(tokens.isNotEmpty() && tokens.any { record.lowercase().contains(it) }) {
-     if(out.length + record.length < 25000 && matches < 50) {
-      out.append("\\n").append(pair.first).append("[").append(i).append("]: ").append(record)
-      matches++
-     } else omitted++
-    }
-   }
+  val orders=SnapshotMerger.active(data,"order")
+  val clients=SnapshotMerger.active(data,"client")
+  val clientsById=clients.associateBy { it.optString("id") }
+  val matchedClients=clients.filter { c->c.optString("name").length>=3 && question.contains(c.optString("name"),true) }
+  val filtered=if(matchedClients.isEmpty()) orders else orders.filter { o->matchedClients.any { it.optString("id")==o.optString("clientId") } }
+  val out=StringBuilder(SnapshotMerger.summary(data))
+  out.append("\\nЗаказов в выборке: ").append(filtered.size).append("; икон в выборке: ").append(filtered.sumOf { it.optDouble("total",0.0) }.toLong())
+  filtered.take(30).forEach { o->
+   out.append("\\nЗаказ ").append(o.optString("orderCode")).append(", клиент ").append(clientsById[o.optString("clientId")]?.optString("name")?:"неизвестен")
+    .append(", статус ").append(o.optString("status")).append(", дата ").append(o.optString("date"))
+    .append(", количество ").append(o.optDouble("total",0.0).toLong())
   }
-  if(tokens.isEmpty()) out.append("\\nУточни критерии выборки: передача всей базы в одном запросе отключена.")
-  if(omitted>0) out.append("\\nОграничение контекста: ещё ").append(omitted).append(" совпадений не переданы модели. Не делай выводов о полноте выборки.")
+  if(filtered.size>30) out.append("\\nПоказаны только 30 записей. Для подсчётов используй полную сводку выше.")
   return out.toString()
  }
  @Composable private fun App() {
@@ -97,21 +87,39 @@ class MainActivity : ComponentActivity() {
   var response by remember { mutableStateOf("Загрузите снимок базы JSON или задайте вопрос.") }
   var snapshot by remember { mutableStateOf<JSONObject?>(null) }
   var fileName by remember { mutableStateOf("База не загружена") }
-  var savedUri by remember { mutableStateOf(getSharedPreferences("ai",0).getString("snapshot_uri","") ?: "") }
-  fun reloadSnapshot(uri:Uri) {
-   runCatching { contentResolver.openInputStream(uri)?.bufferedReader()?.use { r->JSONObject(r.readText()) } ?: error("Пустой файл") }
-    .onSuccess { snapshot=it;fileName="База обновлена: "+java.text.SimpleDateFormat("dd.MM.yyyy HH:mm",java.util.Locale.getDefault()).format(java.util.Date()) }
-    .onFailure { fileName="Не удалось прочитать базу: "+it.message }
-  }
-  LaunchedEffect(savedUri) { if(savedUri.isNotBlank()) reloadSnapshot(Uri.parse(savedUri)) }
+  val prefs=remember { getSharedPreferences("ai",0) }
+  var folderUri by remember { mutableStateOf(prefs.getString("folder_uri","")?:"") }
+  var savedFiles by remember { mutableStateOf(prefs.getString("file_uris","")?:"") }
+  var report by remember { mutableStateOf<MergeReport?>(null) }
   var busy by remember { mutableStateOf(false) }
   val scope=rememberCoroutineScope()
-  val picker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri:Uri? ->
-   uri?.let { selected ->
-    runCatching { contentResolver.takePersistableUriPermission(selected,Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-    savedUri=selected.toString()
-    getSharedPreferences("ai",0).edit().putString("snapshot_uri",savedUri).apply()
-    reloadSnapshot(selected)
+  fun reload() {
+   runCatching {
+    val uris=if(folderUri.isNotBlank()) SnapshotMerger.folderDocuments(contentResolver,Uri.parse(folderUri))
+     else (0 until JSONArray(savedFiles).length()).map { Uri.parse(JSONArray(savedFiles).getString(it)) }
+    require(uris.isNotEmpty()) { "В источнике не найдено файлов orders-*.json" }
+    SnapshotMerger.merge(SnapshotMerger.readDocuments(contentResolver,uris))
+   }.onSuccess {
+    report=it
+    snapshot=it.database
+    fileName="Прочитано снимков: ${it.sources}; спорных записей: ${it.conflicts.size}; предупреждений: ${it.warnings.size}"
+   }.onFailure { fileName="Ошибка обновления: "+it.message }
+  }
+  LaunchedEffect(folderUri,savedFiles) { if(folderUri.isNotBlank() || savedFiles.isNotBlank()) reload() }
+  val folderPicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri:Uri?->
+   uri?.let {
+    runCatching { contentResolver.takePersistableUriPermission(it,Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+    folderUri=it.toString();savedFiles=""
+    prefs.edit().putString("folder_uri",folderUri).remove("file_uris").apply()
+    reload()
+   }
+  }
+  val filesPicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris:List<Uri>->
+   if(uris.isNotEmpty()) {
+    uris.forEach { runCatching { contentResolver.takePersistableUriPermission(it,Intent.FLAG_GRANT_READ_URI_PERMISSION) } }
+    savedFiles=JSONArray(uris.map { it.toString() }).toString();folderUri=""
+    prefs.edit().putString("file_uris",savedFiles).remove("folder_uri").apply()
+    reload()
    }
   }
   MaterialTheme { Scaffold(topBar={ Text("Артель Свечтовъ AI",modifier=Modifier.padding(18.dp),style=MaterialTheme.typography.titleLarge) },bottomBar={ NavigationBar {
@@ -126,7 +134,7 @@ class MainActivity : ComponentActivity() {
       Button(enabled=!busy&&question.isNotBlank(),onClick={
        busy=true;scope.launch {
         val q=question;val s=snapshot
-        val local=if(s!=null && Regex("заказ|склад|икон|клиент|производ|остат|выруч|статист|долг|верба",RegexOption.IGNORE_CASE).containsMatchIn(q)) databaseContext(s,q) else ""
+        val local=if(s!=null && Regex("заказ|склад|икон|клиент|производ|остат|выруч|статист|долг|верба",RegexOption.IGNORE_CASE).containsMatchIn(q)) "\\nЛокальные данные: "+databaseContext(s,q) else ""
         response=if(model.isBlank()) "Укажи modelUri в настройках." else {
          val k=secret.ifBlank { loadSecret() }
          if(k.isBlank()) "Сохрани API-ключ в настройках." else runCatching { ask(k,model,q+local) }.getOrElse { "Ошибка сети: "+it.message }
@@ -137,26 +145,13 @@ class MainActivity : ComponentActivity() {
      1 -> {
       Text("Локальная база",style=MaterialTheme.typography.titleMedium)
       Text(fileName)
-      Button(onClick={picker.launch(arrayOf("application/json","text/plain"))}) { Text("Выбрать файл на Google Drive") }
-      Button(enabled=savedUri.isNotBlank(),onClick={reloadSnapshot(Uri.parse(savedUri))}) { Text("Обновить данные") }
-      Text("Выбранный документ запоминается. Обновление при открытии приложения и по кнопке; изменения исходного файла не выполняются.")
-      val s=snapshot
-      if(s!=null) {
-       Text("Заказов: "+(s.optJSONArray("orders")?.length() ?: 0))
-       Text("Клиентов: "+(s.optJSONArray("clients")?.length() ?: 0))
-       Text("Позиций склада: "+(s.optJSONArray("stock")?.length() ?: 0))
-       Text("Синхронизация: ручная. Источник данных не изменяется.")
+      Button(onClick={folderPicker.launch(null)}) { Text("Подключить папку read-model") }
+      Button(onClick={filesPicker.launch(arrayOf("application/json","text/plain","application/octet-stream"))}) { Text("Выбрать несколько JSON (если папка недоступна)") }
+      Button(enabled=folderUri.isNotBlank()||savedFiles.isNotBlank(),onClick={reload()}) { Text("Обновить все снимки") }
+      Text("Данные читаются только для анализа; файлы на Google Диске не изменяются.")
+      snapshot?.let { Text(SnapshotMerger.summary(it)) }
+      report?.let { r->
+       if(r.conflicts.isNotEmpty()) Text("Спорные записи исключены из аналитики: "+r.conflicts.take(8).joinToString()+if(r.conflicts.size>8)"…" else "")
+       if(r.warnings.isNotEmpty()) Text(r.warnings.take(4).joinToString("\\n"))
       }
-     }
-     else -> {
-      Text("Yandex AI Studio",style=MaterialTheme.typography.titleMedium)
-      OutlinedTextField(value=secret,onValueChange={secret=it},label={Text("API-ключ")},modifier=Modifier.fillMaxWidth(),visualTransformation=androidx.compose.ui.text.input.PasswordVisualTransformation())
-      OutlinedTextField(value=model,onValueChange={model=it},label={Text("modelUri (например gpt://<folder-id>/yandexgpt-lite/latest)")},modifier=Modifier.fillMaxWidth())
-      Button(onClick={saveSecret(secret);getSharedPreferences("ai",0).edit().putString("model",model).apply();secret="";response="Настройки сохранены"}) { Text("Сохранить настройки") }
-      Text("Ключ хранится зашифрованным на устройстве. Не добавляйте ключ в GitHub.")
-     }
-    }
-   }
-  } }
- }
-}
+
