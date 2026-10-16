@@ -66,17 +66,28 @@ object SnapshotMerger {
    uri.toString() to json
   }
  fun folderDocuments(resolver:ContentResolver,tree:Uri):List<Uri> {
-  val parent=DocumentsContract.getTreeDocumentId(tree)
-  val children=DocumentsContract.buildChildDocumentsUriUsingTree(tree,parent)
   val result=mutableListOf<Uri>()
-  resolver.query(children,arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME,DocumentsContract.Document.COLUMN_MIME_TYPE),null,null,null)?.use { cursor->
-   while(cursor.moveToNext()) {
-    val name=cursor.getString(1)?:continue
-    val mime=cursor.getString(2)
-    if(name.startsWith("orders-",true)&&name.endsWith(".json",true)&&mime!=DocumentsContract.Document.MIME_TYPE_DIR)
-     result.add(DocumentsContract.buildDocumentUriUsingTree(tree,cursor.getString(0)))
-   }
-  }?:error("Поставщик документов не разрешает чтение папки")
+  val rootId=DocumentsContract.getTreeDocumentId(tree)
+  fun visit(parentId:String,depth:Int) {
+   if(depth>3) return
+   val children=DocumentsContract.buildChildDocumentsUriUsingTree(tree,parentId)
+   resolver.query(children,arrayOf(
+    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+    DocumentsContract.Document.COLUMN_MIME_TYPE),null,null,null)?.use { cursor->
+    while(cursor.moveToNext()) {
+     val id=cursor.getString(0)?:continue
+     val name=cursor.getString(1)?:continue
+     val mime=cursor.getString(2)
+     if(mime==DocumentsContract.Document.MIME_TYPE_DIR) {
+      if(depth==0 && name.equals("read-model",true)) visit(id,depth+1)
+     } else if(name.startsWith("orders-",true)&&name.endsWith(".json",true)) {
+      result.add(DocumentsContract.buildDocumentUriUsingTree(tree,id))
+     }
+    }
+   }?:error("Нет доступа к содержимому папки")
+  }
+  visit(rootId,0)
   return result
  }
  fun active(root:JSONObject,kind:String):List<JSONObject> {
