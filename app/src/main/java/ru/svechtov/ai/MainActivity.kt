@@ -2,6 +2,7 @@ package ru.svechtov.ai
 
 import android.os.Bundle
 import android.net.Uri
+import android.content.Intent
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -52,7 +53,7 @@ class MainActivity : ComponentActivity() {
    conn.requestMethod="POST";conn.connectTimeout=15000;conn.readTimeout=45000;conn.doOutput=true
    conn.setRequestProperty("Content-Type","application/json")
    conn.setRequestProperty("Authorization","Api-Key $key")
-   val payload=JSONObject().put("modelUri",model).put("completionOptions",JSONObject().put("stream",false).put("temperature",0.2).put("maxTokens","1000")).put("messages",org.json.JSONArray().put(JSONObject().put("role","system").put("text","Ты помощник Артель Свечтовъ. Не выдумывай статистику. Если база не предоставлена, сообщи об этом.")).put(JSONObject().put("role","user").put("text",prompt)))
+   val payload=JSONObject().put("modelUri",model).put("completionOptions",JSONObject().put("stream",false).put("temperature",0.2).put("maxTokens","1000")).put("messages",org.json.JSONArray().put(JSONObject().put("role","system").put("text","Ты полезный русскоязычный помощник Артель Свечтовъ. Отвечай на общие вопросы без базы. Если вопрос требует конкретных данных заказов, а данные не предоставлены, честно сообщи об этом. Никогда не выдумывай цифры.")).put(JSONObject().put("role","user").put("text",prompt)))
    conn.outputStream.use { it.write(payload.toString().toByteArray()) }
    val status=conn.responseCode
    val response=(if(status in 200..299) conn.inputStream else conn.errorStream).bufferedReader().use { it.readText() }
@@ -68,10 +69,22 @@ class MainActivity : ComponentActivity() {
   var response by remember { mutableStateOf("Загрузите снимок базы JSON или задайте вопрос.") }
   var snapshot by remember { mutableStateOf<JSONObject?>(null) }
   var fileName by remember { mutableStateOf("База не загружена") }
+  var savedUri by remember { mutableStateOf(getSharedPreferences("ai",0).getString("snapshot_uri","") ?: "") }
+  fun reloadSnapshot(uri:Uri) {
+   runCatching { contentResolver.openInputStream(uri)?.bufferedReader()?.use { r->JSONObject(r.readText()) } ?: error("Пустой файл") }
+    .onSuccess { snapshot=it;fileName="База обновлена: "+java.text.SimpleDateFormat("dd.MM.yyyy HH:mm",java.util.Locale.getDefault()).format(java.util.Date()) }
+    .onFailure { fileName="Не удалось прочитать базу: "+it.message }
+  }
+  LaunchedEffect(savedUri) { if(savedUri.isNotBlank()) reloadSnapshot(Uri.parse(savedUri)) }
   var busy by remember { mutableStateOf(false) }
   val scope=rememberCoroutineScope()
   val picker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri:Uri? ->
-   uri?.let { runCatching { contentResolver.openInputStream(it)?.bufferedReader()?.use { r->JSONObject(r.readText()) } ?: error("Empty file") }.onSuccess { snapshot=it;fileName="JSON загружен" }.onFailure { fileName="Ошибка JSON: "+it.message } }
+   uri?.let { selected ->
+    runCatching { contentResolver.takePersistableUriPermission(selected,Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+    savedUri=selected.toString()
+    getSharedPreferences("ai",0).edit().putString("snapshot_uri",savedUri).apply()
+    reloadSnapshot(selected)
+   }
   }
   MaterialTheme { Scaffold(topBar={ Text("Артель Свечтовъ AI",modifier=Modifier.padding(18.dp),style=MaterialTheme.typography.titleLarge) },bottomBar={ NavigationBar {
    listOf("Чат","Аналитика","Настройки").forEachIndexed { i,t->NavigationBarItem(selected=tab==i,onClick={tab=i},icon={Text(if(i==0)"●" else if(i==1)"▤" else "⚙")},label={Text(t)}) }
@@ -96,7 +109,9 @@ class MainActivity : ComponentActivity() {
      1 -> {
       Text("Локальная база",style=MaterialTheme.typography.titleMedium)
       Text(fileName)
-      Button(onClick={picker.launch(arrayOf("application/json","text/plain"))}) { Text("Импорт JSON (в том числе Google Drive)") }
+      Button(onClick={picker.launch(arrayOf("application/json","text/plain"))}) { Text("Выбрать файл на Google Drive") }
+      Button(enabled=savedUri.isNotBlank(),onClick={reloadSnapshot(Uri.parse(savedUri))}) { Text("Обновить данные") }
+      Text("Выбранный документ запоминается. Обновление при открытии приложения и по кнопке; изменения исходного файла не выполняются.")
       val s=snapshot
       if(s!=null) {
        Text("Заказов: "+(s.optJSONArray("orders")?.length() ?: 0))
