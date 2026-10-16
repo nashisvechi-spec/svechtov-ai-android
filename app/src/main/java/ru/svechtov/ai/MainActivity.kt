@@ -91,13 +91,19 @@ class MainActivity : ComponentActivity() {
   var folderUri by remember { mutableStateOf(prefs.getString("folder_uri","")?:"") }
   var savedFiles by remember { mutableStateOf(prefs.getString("file_uris","")?:"") }
   var report by remember { mutableStateOf<MergeReport?>(null) }
+  var inventory by remember { mutableStateOf<SyncInventory?>(null) }
   var busy by remember { mutableStateOf(false) }
   val scope=rememberCoroutineScope()
   fun reload() {
+   if(folderUri.isNotBlank()) {
+    runCatching { SyncInventoryReader.scan(contentResolver,Uri.parse(folderUri)) }
+     .onSuccess { inventory=it }
+     .onFailure { fileName="Ошибка чтения структуры OrderTrackerSync: "+it.message; return }
+   }
    runCatching {
     val uris=if(folderUri.isNotBlank()) SnapshotMerger.folderDocuments(contentResolver,Uri.parse(folderUri))
      else (0 until JSONArray(savedFiles).length()).map { Uri.parse(JSONArray(savedFiles).getString(it)) }
-    require(uris.isNotEmpty()) { "В источнике не найдено файлов orders-*.json" }
+    require(uris.isNotEmpty()) { "В выбранной папке нет файлов orders-*.json. Для анализа операций пока используется режим просмотра структуры." }
     SnapshotMerger.merge(SnapshotMerger.readDocuments(contentResolver,uris))
    }.onSuccess {
     report=it
@@ -145,11 +151,16 @@ class MainActivity : ComponentActivity() {
      1 -> {
       Text("Локальная база",style=MaterialTheme.typography.titleMedium)
       Text(fileName)
-      Button(onClick={folderPicker.launch(null)}) { Text("Подключить папку read-model") }
+      Button(onClick={folderPicker.launch(null)}) { Text("Подключить OrderTrackerSync или read-model") }
       Button(onClick={filesPicker.launch(arrayOf("application/json","text/plain","application/octet-stream"))}) { Text("Выбрать несколько JSON (если папка недоступна)") }
       Button(enabled=folderUri.isNotBlank()||savedFiles.isNotBlank(),onClick={reload()}) { Text("Обновить все снимки") }
       Text("Данные читаются только для анализа; файлы на Google Диске не изменяются.")
       snapshot?.let { Text(SnapshotMerger.summary(it)) }
+      inventory?.let { inv->
+       Text("Структура синхронизации: "+inv.folders.entries.joinToString("\\n") { "${it.key}: ${it.value} файлов" })
+       if(inv.warnings.isNotEmpty()) Text("Ограничения доступа: "+inv.warnings.take(4).joinToString("; "))
+       Text("Операции пока не применяются: показана структура папок. Для чисел заказов используются только проверенные снимки read-model.")
+      }
       report?.let { r->
        if(r.conflicts.isNotEmpty()) Text("Спорные записи исключены из аналитики: "+r.conflicts.take(8).joinToString()+if(r.conflicts.size>8)"…" else "")
        if(r.warnings.isNotEmpty()) Text(r.warnings.take(4).joinToString("\\n"))
