@@ -154,4 +154,16 @@ class MainActivity : ComponentActivity() {
        if(r.conflicts.isNotEmpty()) Text("Спорные записи исключены из аналитики: "+r.conflicts.take(8).joinToString()+if(r.conflicts.size>8)"…" else "")
        if(r.warnings.isNotEmpty()) Text(r.warnings.take(4).joinToString("\\n"))
       }
-
+     }
+     else -> {
+      Text("Yandex AI Studio",style=MaterialTheme.typography.titleMedium)
+      OutlinedTextField(value=secret,onValueChange={secret=it},label={Text("API-ключ")},modifier=Modifier.fillMaxWidth(),visualTransformation=androidx.compose.ui.text.input.PasswordVisualTransformation())
+      OutlinedTextField(value=model,onValueChange={model=it},label={Text("modelUri")},modifier=Modifier.fillMaxWidth())
+      Button(onClick={saveSecret(secret);getSharedPreferences("ai",0).edit().putString("model",model).apply();secret="";response="Настройки сохранены"}) { Text("Сохранить настройки") }
+      Text("Ключ хранится зашифрованным на устройстве.")
+     }
+    }
+   }
+  } }
+ }
+}
